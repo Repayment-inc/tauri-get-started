@@ -55,7 +55,7 @@ button {
   background: #ffffff;
   color: inherit;
   font-size: 14px;
-  cursor: pointer;
+  cursor: pointer !important;
   transition: all 0.2s ease;
 }
 
@@ -193,11 +193,36 @@ tr:nth-child(even) td {
   background-color: #fafbfc;
 }
 
-tr[draggable="true"] {
-  cursor: grab;
+.row-handle-column {
+  width: 40px;
 }
 
-tr[draggable="true"]:active {
+.row-handle-cell {
+  width: 40px;
+  padding: 0 8px;
+  text-align: center;
+}
+
+.drag-handle {
+  width: 100%;
+  border: none;
+  background: transparent;
+  padding: 6px 0;
+  cursor: grab;
+  font-size: 16px;
+  line-height: 1;
+  color: #9aa5b1;
+  user-select: none;
+  display: inline-block;
+  text-align: center;
+  touch-action: none;
+}
+
+.drag-handle:hover {
+  color: #52606d;
+}
+
+.drag-handle:active {
   cursor: grabbing;
 }
 
@@ -226,6 +251,7 @@ input[type="number"] {
   font-size: 14px;
   background: #ffffff;
   transition: border-color 0.2s ease;
+  cursor: text;
 }
 
 input[type="text"]:focus,
@@ -350,6 +376,14 @@ input[type="checkbox"] {
     background: #243b53;
     color: #e4e7eb;
     border-color: #1b2a41;
+  }
+
+  .drag-handle {
+    color: #9fb3c8;
+  }
+
+  .drag-handle:hover {
+    color: #f5f7fa;
   }
 
   .cell-display:hover {

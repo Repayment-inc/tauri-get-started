@@ -3,6 +3,21 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { open, save } from "@tauri-apps/plugin-dialog";
+import {
+  DndContext,
+  closestCenter,
+  PointerSensor,
+  useSensor,
+  useSensors,
+  type DragEndEvent,
+} from "@dnd-kit/core";
+import {
+  SortableContext,
+  useSortable,
+  verticalListSortingStrategy,
+  arrayMove,
+} from "@dnd-kit/sortable";
+import { CSS } from "@dnd-kit/utilities";
 
 import type { UnlistenFn } from "@tauri-apps/api/event";
 
@@ -153,13 +168,20 @@ export default function App(): JSX.Element {
   const ignoreEventsUntilRef = useRef<number>(0);
   const suspendAutoSaveRef = useRef<boolean>(false);
   const unlistenRef = useRef<Promise<UnlistenFn> | null>(null);
-  const draggedRowIdRef = useRef<string | null>(null);
   const draggedColumnIdRef = useRef<string | null>(null);
 
   const userColumns = useMemo(() => {
     if (!schema) return [] as ColumnDefinition[];
     return schema.columns.filter((column) => !column.hidden);
   }, [schema]);
+
+  const sensors = useSensors(
+    useSensor(PointerSensor, {
+      activationConstraint: {
+        distance: 8,
+      },
+    })
+  );
 
   const performSave = useCallback(async () => {
     if (!latestPayloadRef.current || !schema) return;
@@ -227,6 +249,30 @@ export default function App(): JSX.Element {
     if (!dirty) return;
     await performSave();
   }, [dirty, performSave]);
+
+  const handleDragEnd = useCallback(
+    (event: DragEndEvent) => {
+      const { active, over } = event;
+
+      if (!over || !schema) return;
+      if (active.id === over.id) return;
+
+      const oldIndex = rows.findIndex((row) => row._id === active.id);
+      const newIndex = rows.findIndex((row) => row._id === over.id);
+
+      if (oldIndex === -1 || newIndex === -1) return;
+
+      const reordered = arrayMove(rows, oldIndex, newIndex).map((row, index) => ({
+        ...row,
+        _order: index,
+        _updated: new Date().toISOString(),
+      }));
+
+      setRows(reordered);
+      scheduleSave(reordered, schema);
+    },
+    [rows, schema, scheduleSave]
+  );
 
   const applySnapshot = useCallback((snapshot: TablePayload) => {
     suspendAutoSaveRef.current = true;
@@ -368,25 +414,6 @@ export default function App(): JSX.Element {
     [rows, schema, scheduleSave]
   );
 
-  const handleRowDrop = useCallback(
-    (targetRowId: string) => {
-      if (!schema) return;
-      const sourceId = draggedRowIdRef.current;
-      draggedRowIdRef.current = null;
-      if (!sourceId || sourceId === targetRowId) return;
-      const fromIndex = rows.findIndex((row) => row._id === sourceId);
-      const toIndex = rows.findIndex((row) => row._id === targetRowId);
-      if (fromIndex === -1 || toIndex === -1) return;
-
-      const reordered = moveItem(rows, fromIndex, toIndex).map((row, index) => ({
-        ...row,
-        _order: index,
-      }));
-      setRows(reordered);
-      scheduleSave(reordered, schema);
-    },
-    [rows, schema, scheduleSave]
-  );
 
   const addColumn = useCallback(
     (name: string, type: ColumnType) => {
@@ -591,67 +618,62 @@ export default function App(): JSX.Element {
               </button>
             </div>
             <div className="table-wrapper">
-              <table>
-                <thead>
-                  <tr>
-                    {userColumns.map((column) => (
-                      <th
-                        key={column.id}
-                        style={column.width ? { width: `${column.width}px` } : undefined}
-                        draggable
-                        onDragStart={() => {
-                          draggedColumnIdRef.current = column.id;
-                        }}
-                        onDragOver={(event) => event.preventDefault()}
-                        onDrop={() => handleColumnDrop(column.id)}
-                      >
-                        <div className="column-header">
-                          <span>{column.name}</span>
-                          {!isSystemColumn(column) && (
-                            <button
-                              type="button"
-                              className="icon-button"
-                              onClick={() => handleDeleteColumn(column.id)}
-                              title="列を削除"
-                            >
-                              ×
-                            </button>
-                          )}
-                        </div>
-                      </th>
-                    ))}
-                    <th className="actions-column">操作</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {rows.map((row) => (
-                    <tr
-                      key={row._id as string}
-                      draggable
-                      onDragStart={() => {
-                        draggedRowIdRef.current = row._id as string;
-                      }}
-                      onDragOver={(event) => event.preventDefault()}
-                      onDrop={() => handleRowDrop(row._id as string)}
-                    >
+              <DndContext
+                sensors={sensors}
+                collisionDetection={closestCenter}
+                onDragEnd={handleDragEnd}
+              >
+                <table>
+                  <thead>
+                    <tr>
+                      <th className="row-handle-column" aria-label="行の並び替えハンドル" />
                       {userColumns.map((column) => (
-                        <td key={`${row._id}_${column.id}`}>
-                          <EditableCell
-                            column={column}
-                            value={row[column.id]}
-                            onChange={(value) => updateCell(row._id as string, column, value)}
-                          />
-                        </td>
+                        <th
+                          key={column.id}
+                          style={column.width ? { width: `${column.width}px` } : undefined}
+                          draggable
+                          onDragStart={() => {
+                            draggedColumnIdRef.current = column.id;
+                          }}
+                          onDragOver={(event) => event.preventDefault()}
+                          onDrop={() => handleColumnDrop(column.id)}
+                        >
+                          <div className="column-header">
+                            <span>{column.name}</span>
+                            {!isSystemColumn(column) && (
+                              <button
+                                type="button"
+                                className="icon-button"
+                                onClick={() => handleDeleteColumn(column.id)}
+                                title="列を削除"
+                              >
+                                ×
+                              </button>
+                            )}
+                          </div>
+                        </th>
                       ))}
-                      <td className="actions-cell">
-                        <button type="button" onClick={() => handleDeleteRow(row._id as string)}>
-                          削除
-                        </button>
-                      </td>
+                      <th className="actions-column">操作</th>
                     </tr>
-                  ))}
-                </tbody>
-              </table>
+                  </thead>
+                  <SortableContext
+                    items={rows.map((row) => row._id as string)}
+                    strategy={verticalListSortingStrategy}
+                  >
+                    <tbody>
+                      {rows.map((row) => (
+                        <SortableRow
+                          key={row._id as string}
+                          row={row}
+                          userColumns={userColumns}
+                          onCellChange={updateCell}
+                          onDelete={handleDeleteRow}
+                        />
+                      ))}
+                    </tbody>
+                  </SortableContext>
+                </table>
+              </DndContext>
             </div>
           </>
         ) : (
@@ -705,6 +727,49 @@ export default function App(): JSX.Element {
         </div>
       )}
     </div>
+  );
+}
+
+interface SortableRowProps {
+  row: TableRow;
+  userColumns: ColumnDefinition[];
+  onCellChange: (rowId: string, column: ColumnDefinition, value: unknown) => void;
+  onDelete: (rowId: string) => void;
+}
+
+function SortableRow({ row, userColumns, onCellChange, onDelete }: SortableRowProps): JSX.Element {
+  const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({
+    id: row._id as string,
+  });
+
+  const style = {
+    transform: CSS.Transform.toString(transform),
+    transition,
+    opacity: isDragging ? 0.5 : 1,
+  };
+
+  return (
+    <tr ref={setNodeRef} style={style}>
+      <td className="row-handle-cell">
+        <div className="drag-handle" {...attributes} {...listeners}>
+          ⋮⋮
+        </div>
+      </td>
+      {userColumns.map((column) => (
+        <td key={`${row._id}_${column.id}`}>
+          <EditableCell
+            column={column}
+            value={row[column.id]}
+            onChange={(value) => onCellChange(row._id as string, column, value)}
+          />
+        </td>
+      ))}
+      <td className="actions-cell">
+        <button type="button" onClick={() => onDelete(row._id as string)}>
+          削除
+        </button>
+      </td>
+    </tr>
   );
 }
 
