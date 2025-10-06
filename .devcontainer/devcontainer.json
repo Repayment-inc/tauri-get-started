@@ -1,0 +1,41 @@
+{
+  "name": "Tauri Development",
+  "image": "mcr.microsoft.com/devcontainers/rust:latest",
+
+  "workspaceFolder": "/workspaces/${localWorkspaceFolderBasename}",
+
+  "features": {
+    "ghcr.io/devcontainers/features/node:1": {
+      "version": "lts"
+    },
+    "ghcr.io/devcontainers/features/desktop-lite:1": {
+      "password": "vscode",
+      "webPort": "6080",
+      "vncPort": "5901"
+    }
+  },
+
+  "postCreateCommand": "sudo apt-get update && sudo apt-get install -y libwebkit2gtk-4.1-dev build-essential curl wget file libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev && npm install",
+
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "tauri-apps.tauri-vscode",
+        "rust-lang.rust-analyzer",
+        "dbaeumer.vscode-eslint",
+        "esbenp.prettier-vscode"
+      ],
+      "settings": {
+        "terminal.integrated.defaultProfile.linux": "zsh",
+        "terminal.integrated.profiles.linux": {
+          "zsh": { "path": "/bin/zsh" },
+          "bash": { "path": "/bin/bash" }
+        }
+      }
+    }
+  },
+
+  "forwardPorts": [1420, 6080],
+
+  "remoteUser": "vscode"
+}
