@@ -1,8 +1,11 @@
+// Reactと必要なフックをインポート
 import type { JSX } from "react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+// Tauri APIをインポート（バックエンドとの通信用）
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { open, save } from "@tauri-apps/plugin-dialog";
+// ドラッグ&ドロップライブラリをインポート
 import {
   DndContext,
   closestCenter,
@@ -21,62 +24,80 @@ import { CSS } from "@dnd-kit/utilities";
 
 import type { UnlistenFn } from "@tauri-apps/api/event";
 
+// カラムのデータ型
 type ColumnType = "text" | "number" | "checkbox" | "multiselect" | "relation";
 
+// テーブルの1行を表す型（キーは列ID、値は任意の型）
 type TableRow = Record<string, unknown>;
 
+/** カラム定義を表すインターフェース */
 interface ColumnDefinition {
-  id: string;
-  name: string;
-  type: ColumnType;
-  width?: number;
-  required?: boolean;
-  hidden?: boolean;
-  system?: boolean;
-  format?: string;
+  id: string;           // カラムの一意なID
+  name: string;         // 表示名
+  type: ColumnType;     // データ型
+  width?: number;       // 列の幅（ピクセル）
+  required?: boolean;   // 必須かどうか
+  hidden?: boolean;     // 非表示かどうか
+  system?: boolean;     // システム列かどうか（_id, _created等）
+  format?: string;      // フォーマット指定（将来の拡張用）
 }
 
+/** テーブルスキーマを表すインターフェース */
 interface TableSchema {
-  version?: string;
-  table_name?: string;
-  columns: ColumnDefinition[];
-  metadata?: Record<string, unknown>;
-  extensions?: Record<string, unknown>;
+  version?: string;                     // スキーマバージョン
+  table_name?: string;                  // テーブル名
+  columns: ColumnDefinition[];          // カラム定義の配列
+  metadata?: Record<string, unknown>;   // メタデータ（行数、更新日時等）
+  extensions?: Record<string, unknown>; // 拡張情報
 }
 
+/** バックエンドから受け取るワークスペース情報 */
 interface WorkspaceInfoPayload {
   data_path: string;
   schema_path: string;
   folder: string;
 }
 
+/** バックエンドから受け取るテーブルデータのペイロード */
 interface TablePayload {
   data: TableRow[];
   schema: TableSchema;
   workspace: WorkspaceInfoPayload;
 }
 
+/** フロントエンドで管理するワークスペース情報 */
 interface WorkspaceInfo {
   dataPath: string;
   schemaPath: string;
   folder: string;
 }
 
+/** 保存結果を表すインターフェース */
 interface SaveResult {
   row_count: number;
   updated_at: string;
 }
 
+/** 外部変更検出時の競合状態を表すインターフェース */
 interface ConflictState {
-  snapshot: TablePayload;
-  detectedAt: string;
+  snapshot: TablePayload;  // 外部で変更された最新のデータ
+  detectedAt: string;      // 変更を検出した日時
 }
 
+// ローカルで使用可能なカラムタイプ（将来的に拡張可能）
 const LOCAL_COLUMN_TYPES: ColumnType[] = ["text", "number", "checkbox"];
 
+// システム列のプレフィックス（_id, _created, _updated等）
 const SYSTEM_COLUMN_PREFIX = "_";
 
+/**
+ * カラム名から一意なIDを生成する
+ * @param name カラム名
+ * @param existingIds 既存のID一覧
+ * @returns 一意なカラムID
+ */
 function toColumnId(name: string, existingIds: string[]): string {
+  // 名前を小文字に変換し、英数字以外をアンダースコアに置換
   const base = name
     .trim()
     .toLowerCase()
@@ -84,6 +105,7 @@ function toColumnId(name: string, existingIds: string[]): string {
     .replace(/^_+|_+$/g, "");
   let candidate = base || `col_${Date.now()}`;
   let counter = 1;
+  // 重複がなくなるまでサフィックスを追加
   while (existingIds.includes(candidate)) {
     candidate = `${base}_${counter}`;
     counter += 1;
@@ -91,8 +113,15 @@ function toColumnId(name: string, existingIds: string[]): string {
   return candidate;
 }
 
+/**
+ * 空の行を作成する
+ * @param columns カラム定義の配列
+ * @param order 行の順序
+ * @returns 新しい空の行
+ */
 function createEmptyRow(columns: ColumnDefinition[], order: number): TableRow {
   const now = new Date().toISOString();
+  // システム列を初期化
   const row: TableRow = {
     _id: `row_${crypto.randomUUID().slice(0, 8)}`,
     _created: now,
@@ -100,7 +129,9 @@ function createEmptyRow(columns: ColumnDefinition[], order: number): TableRow {
     _order: order,
   };
 
+  // 各カラムにデフォルト値を設定
   columns.forEach((column) => {
+    // システム列はスキップ
     if (column.id.startsWith(SYSTEM_COLUMN_PREFIX)) {
       return;
     }
@@ -108,6 +139,7 @@ function createEmptyRow(columns: ColumnDefinition[], order: number): TableRow {
       return;
     }
 
+    // カラムのタイプに応じたデフォルト値を設定
     switch (column.type) {
       case "number":
         row[column.id] = 0;
@@ -123,6 +155,13 @@ function createEmptyRow(columns: ColumnDefinition[], order: number): TableRow {
   return row;
 }
 
+/**
+ * 配列内のアイテムを移動する
+ * @param items 配列
+ * @param fromIndex 移動元のインデックス
+ * @param toIndex 移動先のインデックス
+ * @returns 移動後の新しい配列
+ */
 function moveItem<T>(items: T[], fromIndex: number, toIndex: number): T[] {
   if (fromIndex === toIndex) return items;
   const next = [...items];
@@ -131,6 +170,11 @@ function moveItem<T>(items: T[], fromIndex: number, toIndex: number): T[] {
   return next;
 }
 
+/**
+ * 文字列を数値に正規化する
+ * @param value 入力文字列
+ * @returns 数値（パース失敗時は0）
+ */
 function normaliseNumber(value: string): number {
   if (value.trim() === "") {
     return 0;
@@ -139,42 +183,60 @@ function normaliseNumber(value: string): number {
   return Number.isNaN(parsed) ? 0 : parsed;
 }
 
+/**
+ * システム列かどうかを判定する
+ * @param column カラム定義
+ * @returns システム列の場合true
+ */
 function isSystemColumn(column: ColumnDefinition): boolean {
   return column.system ?? column.id.startsWith(SYSTEM_COLUMN_PREFIX);
 }
 
+/**
+ * 行データの配列をディープコピーする
+ * @param rows 行データの配列
+ * @returns コピーされた配列
+ */
 function cloneRows(rows: TableRow[]): TableRow[] {
   return rows.map((row) => ({ ...row }));
 }
 
+/**
+ * メインアプリケーションコンポーネント
+ * テーブルエディタのUI全体を管理
+ */
 export default function App(): JSX.Element {
-  const [rows, setRows] = useState<TableRow[]>([]);
-  const [schema, setSchema] = useState<TableSchema | null>(null);
-  const [workspace, setWorkspace] = useState<WorkspaceInfo | null>(null);
+  // ========== State管理 ==========
+  const [rows, setRows] = useState<TableRow[]>([]);                      // テーブルの行データ
+  const [schema, setSchema] = useState<TableSchema | null>(null);         // テーブルスキーマ
+  const [workspace, setWorkspace] = useState<WorkspaceInfo | null>(null); // ワークスペース情報
   const [statusMessage, setStatusMessage] = useState<string>("ワークスペースを選択してください");
-  const [isSaving, setIsSaving] = useState(false);
-  const [isLoading, setIsLoading] = useState(false);
-  const [dirty, setDirty] = useState(false);
-  const [conflict, setConflict] = useState<ConflictState | null>(null);
-  const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const [isSaving, setIsSaving] = useState(false);                        // 保存中フラグ
+  const [isLoading, setIsLoading] = useState(false);                      // 読み込み中フラグ
+  const [dirty, setDirty] = useState(false);                              // 未保存の変更があるか
+  const [conflict, setConflict] = useState<ConflictState | null>(null);   // 外部変更の競合状態
+  const [errorMessage, setErrorMessage] = useState<string | null>(null);  // エラーメッセージ
   const [columnDialog, setColumnDialog] = useState<{
     open: boolean;
     name: string;
     type: ColumnType;
-  }>({ open: false, name: "", type: "text" });
+  }>({ open: false, name: "", type: "text" });                            // カラム追加ダイアログの状態
 
-  const saveTimerRef = useRef<number | null>(null);
-  const latestPayloadRef = useRef<{ rows: TableRow[]; schema: TableSchema } | null>(null);
-  const ignoreEventsUntilRef = useRef<number>(0);
-  const suspendAutoSaveRef = useRef<boolean>(false);
-  const unlistenRef = useRef<Promise<UnlistenFn> | null>(null);
-  const draggedColumnIdRef = useRef<string | null>(null);
+  // ========== Ref管理 ==========
+  const saveTimerRef = useRef<number | null>(null);                       // 自動保存タイマー
+  const latestPayloadRef = useRef<{ rows: TableRow[]; schema: TableSchema } | null>(null); // 最新の保存予定データ
+  const ignoreEventsUntilRef = useRef<number>(0);                         // ファイル変更イベントを無視する期限
+  const suspendAutoSaveRef = useRef<boolean>(false);                      // 自動保存を一時停止するフラグ
+  const unlistenRef = useRef<Promise<UnlistenFn> | null>(null);           // イベントリスナーの解除関数
+  const draggedColumnIdRef = useRef<string | null>(null);                 // ドラッグ中のカラムID
 
+  // ユーザーに表示するカラム（非表示カラムを除外）
   const userColumns = useMemo(() => {
     if (!schema) return [] as ColumnDefinition[];
     return schema.columns.filter((column) => !column.hidden);
   }, [schema]);
 
+  // ドラッグ&ドロップのセンサー設定（8pxの移動で反応）
   const sensors = useSensors(
     useSensor(PointerSensor, {
       activationConstraint: {
@@ -183,11 +245,16 @@ export default function App(): JSX.Element {
     })
   );
 
+  /**
+   * データを保存する処理
+   * バックエンドのsave_tableコマンドを呼び出す
+   */
   const performSave = useCallback(async () => {
     if (!latestPayloadRef.current || !schema) return;
     if (!workspace) return;
 
     const payload = latestPayloadRef.current;
+    // 既存のタイマーをクリア
     if (saveTimerRef.current) {
       window.clearTimeout(saveTimerRef.current);
       saveTimerRef.current = null;
@@ -195,6 +262,7 @@ export default function App(): JSX.Element {
     setIsSaving(true);
     setStatusMessage("保存中…");
     setErrorMessage(null);
+    // 保存後2秒間はファイル変更イベントを無視（自分の変更を検出しないため）
     ignoreEventsUntilRef.current = Date.now() + 2000;
 
     try {
@@ -206,6 +274,7 @@ export default function App(): JSX.Element {
       });
       setDirty(false);
       setStatusMessage(`保存完了 (${new Date(result.updated_at).toLocaleTimeString()})`);
+      // 保存成功したデータを記録
       latestPayloadRef.current = {
         rows: cloneRows(payload.rows),
         schema: { ...payload.schema },
@@ -225,8 +294,14 @@ export default function App(): JSX.Element {
     }
   }, [schema, workspace]);
 
+  /**
+   * 保存をスケジュールする（1秒後に自動保存）
+   * @param nextRows 次の行データ
+   * @param nextSchema 次のスキーマ
+   */
   const scheduleSave = useCallback(
     (nextRows: TableRow[], nextSchema: TableSchema) => {
+      // 自動保存が停止されている場合はデータのみ保存
       if (suspendAutoSaveRef.current) {
         latestPayloadRef.current = { rows: cloneRows(nextRows), schema: { ...nextSchema } };
         return;
@@ -235,6 +310,7 @@ export default function App(): JSX.Element {
       latestPayloadRef.current = { rows: cloneRows(nextRows), schema: { ...nextSchema } };
       setDirty(true);
       setStatusMessage("編集中…");
+      // 既存のタイマーをクリアして新しくスケジュール
       if (saveTimerRef.current) {
         window.clearTimeout(saveTimerRef.current);
       }
@@ -245,11 +321,18 @@ export default function App(): JSX.Element {
     [performSave]
   );
 
+  /**
+   * 保留中の保存を即座に実行する
+   */
   const flushPendingSave = useCallback(async () => {
     if (!dirty) return;
     await performSave();
   }, [dirty, performSave]);
 
+  /**
+   * 行のドラッグ&ドロップ終了時の処理
+   * @param event ドラッグイベント
+   */
   const handleDragEnd = useCallback(
     (event: DragEndEvent) => {
       const { active, over } = event;
@@ -274,7 +357,12 @@ export default function App(): JSX.Element {
     [rows, schema, scheduleSave]
   );
 
+  /**
+   * スナップショット（外部データ）を現在の状態に適用する
+   * @param snapshot テーブルペイロード
+   */
   const applySnapshot = useCallback((snapshot: TablePayload) => {
+    // 自動保存を一時停止してデータを反映
     suspendAutoSaveRef.current = true;
     setRows(cloneRows(snapshot.data));
     setSchema({ ...snapshot.schema });
@@ -293,6 +381,10 @@ export default function App(): JSX.Element {
     suspendAutoSaveRef.current = false;
   }, []);
 
+  /**
+   * ワークスペースを開く処理
+   * ファイルダイアログを表示し、選択されたファイルを読み込む
+   */
   const handleOpenWorkspace = useCallback(async () => {
     await flushPendingSave();
 
@@ -328,9 +420,14 @@ export default function App(): JSX.Element {
     }
   }, [applySnapshot, flushPendingSave]);
 
+  /**
+   * 新しいワークスペースを作成する処理
+   * ファイル保存ダイアログを表示し、新しいテーブルを作成
+   */
   const handleCreateWorkspace = useCallback(async () => {
     await flushPendingSave();
 
+    // タイムスタンプを使ったデフォルトファイル名を生成
     const timestamp = new Date().toISOString().replace(/[:T.-]/g, "").slice(0, 14);
     const suggestedName = `table_${timestamp}.json`;
 
@@ -368,6 +465,10 @@ export default function App(): JSX.Element {
     }
   }, [applySnapshot, flushPendingSave]);
 
+  /**
+   * ワークスペースのファイル変更イベントリスナーを登録
+   * バックエンドからのファイル変更通知を受け取る
+   */
   const registerWorkspaceListeners = useCallback(() => {
     if (unlistenRef.current) {
       unlistenRef.current.then((unlisten) => unlisten());
@@ -397,6 +498,9 @@ export default function App(): JSX.Element {
     };
   }, [registerWorkspaceListeners, flushPendingSave]);
 
+  /**
+   * 新しい行を追加する
+   */
   const handleAddRow = useCallback(() => {
     if (!schema) return;
     const nextRows = [...rows, createEmptyRow(schema.columns, rows.length)];
@@ -404,6 +508,10 @@ export default function App(): JSX.Element {
     scheduleSave(nextRows, schema);
   }, [rows, schema, scheduleSave]);
 
+  /**
+   * 指定した行を削除する
+   * @param rowId 削除する行のID
+   */
   const handleDeleteRow = useCallback(
     (rowId: string) => {
       if (!schema) return;
@@ -414,7 +522,11 @@ export default function App(): JSX.Element {
     [rows, schema, scheduleSave]
   );
 
-
+  /**
+   * カラムを追加する内部関数
+   * @param name カラム名
+   * @param type カラムのデータ型
+   */
   const addColumn = useCallback(
     (name: string, type: ColumnType) => {
       if (!schema) return;
@@ -479,6 +591,10 @@ export default function App(): JSX.Element {
     setColumnDialog({ open: false, name: "", type: "text" });
   }, []);
 
+  /**
+   * カラムを削除する
+   * @param columnId 削除するカラムのID
+   */
   const handleDeleteColumn = useCallback(
     (columnId: string) => {
       if (!schema) return;
@@ -498,12 +614,13 @@ export default function App(): JSX.Element {
         columns: schema.columns.filter((col) => col.id !== columnId),
       };
 
-    const nextRows = rows.map((row) => {
-      if (!(columnId in row)) return row;
-      const updated: TableRow = { ...row };
-      delete updated[columnId];
-      return updated;
-    });
+      // 全行からそのカラムのデータを削除
+      const nextRows = rows.map((row) => {
+        if (!(columnId in row)) return row;
+        const updated: TableRow = { ...row };
+        delete updated[columnId];
+        return updated;
+      });
 
       setSchema(nextSchema);
       setRows(nextRows);
@@ -512,6 +629,10 @@ export default function App(): JSX.Element {
     [rows, schema, scheduleSave]
   );
 
+  /**
+   * カラムのドロップ処理（カラムの並び替え）
+   * @param targetColumnId ドロップ先のカラムID
+   */
   const handleColumnDrop = useCallback(
     (targetColumnId: string) => {
       if (!schema) return;
@@ -531,6 +652,12 @@ export default function App(): JSX.Element {
     [rows, schema, scheduleSave]
   );
 
+  /**
+   * セルの値を更新する
+   * @param rowId 行のID
+   * @param column カラム定義
+   * @param value 新しい値
+   */
   const updateCell = useCallback(
     (rowId: string, column: ColumnDefinition, value: unknown) => {
       if (!schema) return;
@@ -550,11 +677,17 @@ export default function App(): JSX.Element {
     [rows, schema, scheduleSave]
   );
 
+  /**
+   * 競合解決: 自分の変更を保持する
+   */
   const handleResolveKeep = useCallback(async () => {
     await performSave();
     setConflict(null);
   }, [performSave]);
 
+  /**
+   * 競合解決: 外部の変更を読み込む
+   */
   const handleResolveReload = useCallback(() => {
     if (!conflict) return;
     applySnapshot(conflict.snapshot);
@@ -730,6 +863,9 @@ export default function App(): JSX.Element {
   );
 }
 
+/**
+ * SortableRowコンポーネントのプロパティ
+ */
 interface SortableRowProps {
   row: TableRow;
   userColumns: ColumnDefinition[];
@@ -737,6 +873,9 @@ interface SortableRowProps {
   onDelete: (rowId: string) => void;
 }
 
+/**
+ * ドラッグ&ドロップ可能な行コンポーネント
+ */
 function SortableRow({ row, userColumns, onCellChange, onDelete }: SortableRowProps): JSX.Element {
   const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({
     id: row._id as string,
@@ -773,12 +912,19 @@ function SortableRow({ row, userColumns, onCellChange, onDelete }: SortableRowPr
   );
 }
 
+/**
+ * EditableCellコンポーネントのプロパティ
+ */
 interface EditableCellProps {
   column: ColumnDefinition;
   value: unknown;
   onChange: (value: unknown) => void;
 }
 
+/**
+ * 編集可能なセルコンポーネント
+ * ダブルクリックで編集モードに入る
+ */
 function EditableCell({ column, value, onChange }: EditableCellProps): JSX.Element {
   const [draft, setDraft] = useState<string>(String(value ?? ""));
   const [isEditing, setIsEditing] = useState(false);
@@ -845,6 +991,12 @@ function EditableCell({ column, value, onChange }: EditableCellProps): JSX.Eleme
   );
 }
 
+/**
+ * セルの表示値をレンダリングする
+ * @param column カラム定義
+ * @param value 値
+ * @returns 表示用の文字列
+ */
 function renderDisplayValue(column: ColumnDefinition, value: unknown): string {
   if (value === null || value === undefined) return "";
   if (column.type === "number") {
@@ -853,6 +1005,7 @@ function renderDisplayValue(column: ColumnDefinition, value: unknown): string {
   return String(value);
 }
 
+/** バックエンドからのワークスペース変更イベントペイロード */
 interface WorkspaceChangePayload {
   data_path: string;
   schema_path: string;
